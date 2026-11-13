@@ -96,8 +96,10 @@ class BookingController {
     }
 
     @ExceptionHandler(BookingException.class)
-    Result<Void> rejected(BookingException error) {
-        return Result.fail(error.getMessage());
+    Result<Map<String, String>> rejected(BookingException error) {
+        Result<Map<String, String>> response = Result.fail(error.getMessage());
+        response.setData(Map.of("code", error.code.name()));
+        return response;
     }
 
     private long user() {

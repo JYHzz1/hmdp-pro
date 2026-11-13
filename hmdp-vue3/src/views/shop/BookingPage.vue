@@ -17,11 +17,31 @@ const comparison = ref(null)
 const inviteResult = ref(null)
 const staffNotice = ref('')
 const confirmed = computed(() => booking.value?.reservation?.state === 'CONFIRMED')
+const uncertainRequests = new Map()
 
 async function api(path, method = 'get', data) {
   const result = await request({ url: '/booking' + path, method, data })
-  if (!result?.success) throw new Error(result?.errorMsg || '请求未完成')
+  if (!result) throw new Error('未收到操作结果，请重试')
+  if (!result.success) {
+    const rejection = new Error(result.errorMsg || '请求未完成')
+    rejection.businessRejection = Boolean(result.data?.code)
+    rejection.code = result.data?.code
+    throw rejection
+  }
   return result.data
+}
+
+async function sendCommand(path, args) {
+  const key = JSON.stringify([path, args])
+  if (!uncertainRequests.has(key)) uncertainRequests.set(key, crypto.randomUUID())
+  try {
+    const result = await api(path, 'post', { ...args, requestId: uncertainRequests.get(key) })
+    uncertainRequests.delete(key)
+    return result
+  } catch (error) {
+    if (error.businessRejection) uncertainRequests.delete(key)
+    throw error
+  }
 }
 
 async function run(action) {
@@ -48,8 +68,7 @@ let loadedVoucher = ''
 
 function change(operation, value) {
   return run(async () => {
-    await api('/' + booking.value.orderId + '/' + operation, 'post',
-      { value, requestId: crypto.randomUUID() })
+    await sendCommand('/' + booking.value.orderId + '/' + operation, { value })
     await load()
   })
 }
@@ -67,8 +86,8 @@ function operate(action) {
     staffNotice.value = ''
     const prefix = '/slots/' + encodeURIComponent(station.value.slot)
     if (action === 'redeem') {
-      await api('/shops/' + encodeURIComponent(station.value.shop) + '/redeem', 'post',
-        { orderId: station.value.order, version: station.value.version, requestId: crypto.randomUUID() })
+      await sendCommand('/shops/' + encodeURIComponent(station.value.shop) + '/redeem',
+        { orderId: station.value.order, version: station.value.version })
       staffNotice.value = '核销成功'
     } else if (action === 'close') {
       await api(prefix + '/close', 'post')
@@ -159,6 +178,7 @@ onMounted(() => {
       <div v-if="comparison" class="summary">
         <span>最近优先：{{ comparison.nearest.matches.length }}/{{ comparison.nearest.total }} 可安排 · 总距离 {{ Number(comparison.nearest.totalDistanceKm).toFixed(2) }} 公里</span>
         <span>可选项少优先：{{ comparison.constrained.matches.length }}/{{ comparison.constrained.total }} 可安排 · 总距离 {{ Number(comparison.constrained.totalDistanceKm).toFixed(2) }} 公里</span>
+        <span>最大流：{{ comparison.maximum.matches.length }}/{{ comparison.maximum.total }} 可安排 · 总距离 {{ Number(comparison.maximum.totalDistanceKm).toFixed(2) }} 公里</span>
       </div>
       <p v-if="inviteResult">计划 {{ inviteResult.planned }} 份，发出 {{ inviteResult.offers.length }} 份，冲突 {{ Object.keys(inviteResult.conflicts).length }} 份</p>
       <form class="row" @submit.prevent="operate('redeem')">

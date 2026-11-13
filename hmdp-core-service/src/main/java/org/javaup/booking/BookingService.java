@@ -17,6 +17,8 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.function.LongSupplier;
 
+import static org.javaup.booking.BookingException.Code.*;
+
 @Service
 @ConditionalOnProperty("hmdp.booking.jdbc-url")
 public class BookingService {
@@ -39,7 +41,8 @@ public class BookingService {
     record Offer(long id, long target, long version, LocalDateTime expires, String state) {}
     record BookingView(long orderId, long voucherId, String entitlementState, Reservation reservation,
                        Slot currentSlot, Offer offer, Slot offeredSlot, List<Slot> candidates) {}
-    record Comparison(AssignmentPlanner.Plan nearest, AssignmentPlanner.Plan constrained) {}
+    record Comparison(AssignmentPlanner.Plan nearest, AssignmentPlanner.Plan constrained,
+                      AssignmentPlanner.Plan maximum) {}
 
     public boolean manages(long voucherId) {
         return count("SELECT COUNT(*) FROM booking_product WHERE voucher_id=?", voucherId) > 0;
@@ -83,7 +86,7 @@ public class BookingService {
                 require(sql.update("""
                         UPDATE booking_slot SET booked=booked+1
                         WHERE id=? AND held+booked<capacity
-                        """, slotId) == 1, "时段已满");
+                        """, slotId) == 1, SLOT_FULL, "时段已满");
                 long version = previous == null ? 1 : previous.version() + 1;
                 sql.update("""
                         INSERT INTO booking_reservation(order_id,slot_id,state,version)
@@ -117,7 +120,7 @@ public class BookingService {
         require(now.isBefore(cutoff), "已过改期截止时间");
         require(sql.update("""
                 UPDATE booking_slot SET held=held+1 WHERE id=? AND held+booked<capacity
-                """, targetId) == 1, "目标时段已满，原预约仍有效");
+                """, targetId) == 1, SLOT_FULL, "目标时段已满，原预约仍有效");
         LocalDateTime expires = now.plusMinutes(5);
         if (cutoff.isBefore(expires)) expires = cutoff;
         if (slots.target().start().isBefore(expires)) expires = slots.target().start();
@@ -144,10 +147,10 @@ public class BookingService {
             return command(orderId, "confirm", requestId, Long.toString(offerId), () -> {
                 Reservation reservation = confirmed(orderId);
                 Offer offer = activeOffer(orderId, offerId);
-                require(offer.version() == reservation.version(), "预约已变更，请刷新");
+                require(offer.version() == reservation.version(), STALE_VERSION, "预约已变更，请刷新");
                 Slots slots = lockSlots(reservation.slotId(), offer.target());
                 LocalDateTime now = now();
-                require(now.isBefore(offer.expires()), "改期方案已过期");
+                require(now.isBefore(offer.expires()), OFFER_EXPIRED, "改期方案已过期");
                 validateTarget(entitlement, slots.target(), now);
                 require(sql.update("UPDATE booking_slot SET held=held-1,booked=booked+1 WHERE id=? AND held>0",
                         offer.target()) == 1, "目标占位不存在");
@@ -179,7 +182,7 @@ public class BookingService {
             owned(user, orderId);
             return command(orderId, "cancel", requestId, Long.toString(version), () -> {
                 Reservation reservation = confirmed(orderId);
-                require(reservation.version() == version, "预约已变更，请刷新");
+                require(reservation.version() == version, STALE_VERSION, "预约已变更，请刷新");
                 Offer offer = pending(orderId);
                 Slot current = lockSlots(reservation.slotId(), offer == null ? reservation.slotId() : offer.target()).original();
                 require(now().isBefore(current.start().minusMinutes(30)) || !current.open(), "已过取消截止时间");
@@ -197,7 +200,7 @@ public class BookingService {
             lockEntitlement(orderId);
             return command(orderId, "redeem", requestId, shopId + ":" + version, () -> {
                 Reservation reservation = confirmed(orderId);
-                require(reservation.version() == version, "预约已变更，请刷新");
+                require(reservation.version() == version, STALE_VERSION, "预约已变更，请刷新");
                 Offer offer = pending(orderId);
                 Slot current = lockSlots(reservation.slotId(), offer == null ? reservation.slotId() : offer.target()).original();
                 require(current.shopId() == shopId && current.open(), "该预约不可在此门店核销");
@@ -228,6 +231,19 @@ public class BookingService {
     }
 
     Comparison compare(long actor, long slotId, int radiusKm, int windowHours) {
+        PlanningInput input = planningInput(actor, slotId, radiusKm, windowHours);
+        return new Comparison(AssignmentPlanner.plan(input.demands(), input.capacity(), false),
+                AssignmentPlanner.plan(input.demands(), input.capacity(), true),
+                AssignmentPlanner.maximum(input.demands(), input.capacity()));
+    }
+
+    private record PlanningInput(List<AssignmentPlanner.Demand> demands, Map<Long, Integer> capacity) {
+        AssignmentPlanner.Plan constrained() {
+            return AssignmentPlanner.plan(demands, capacity, true);
+        }
+    }
+
+    private PlanningInput planningInput(long actor, long slotId, int radiusKm, int windowHours) {
         return store.snapshot.execute(status -> {
             Slot source = slot(slotId, false);
             staff(actor, source.shopId());
@@ -263,19 +279,18 @@ public class BookingService {
                 }
                 demands.add(new AssignmentPlanner.Demand(orderId, List.copyOf(choices)));
             }
-            return new Comparison(AssignmentPlanner.plan(demands, capacity, false),
-                    AssignmentPlanner.plan(demands, capacity, true));
+            return new PlanningInput(demands, capacity);
         });
     }
 
     Map<String, Object> applyPlan(long actor, long closedSlot, int radiusKm, int windowHours) {
-        var plan = compare(actor, closedSlot, radiusKm, windowHours).constrained();
+        var plan = planningInput(actor, closedSlot, radiusKm, windowHours).constrained();
         List<Long> offers = new ArrayList<>();
         Map<String, String> conflicts = new HashMap<>();
         int planned = plan.matches().size();
         sendOffers(actor, closedSlot, radiusKm, windowHours, plan, offers, conflicts);
         if (!conflicts.isEmpty()) {
-            var refreshed = compare(actor, closedSlot, radiusKm, windowHours).constrained();
+            var refreshed = planningInput(actor, closedSlot, radiusKm, windowHours).constrained();
             sendOffers(actor, closedSlot, radiusKm, windowHours, refreshed, offers, conflicts);
         }
         return Map.of("planned", planned, "offers", offers, "conflicts", conflicts);
@@ -362,17 +377,20 @@ public class BookingService {
                 SELECT arguments,response_value FROM booking_command WHERE order_id=? AND operation=? AND request_id=?
                 """, orderId, operation, requestId);
         if (!saved.isEmpty()) {
-            require(saved.get(0).get("arguments").equals(arguments), "请求编号已用于其他参数");
+            require(saved.get(0).get("arguments").equals(arguments), REQUEST_CONFLICT, "请求编号已用于其他参数");
             return ((Number) saved.get(0).get("response_value")).longValue();
         }
         long result = action.getAsLong();
-        sql.update("INSERT INTO booking_command VALUES (?,?,?,?,?)", orderId, operation, requestId, arguments, result);
+        sql.update("""
+                INSERT INTO booking_command (order_id,operation,request_id,arguments,response_value)
+                VALUES (?,?,?,?,?)
+                """, orderId, operation, requestId, arguments, result);
         return result;
     }
 
     private Entitlement owned(long user, long orderId) {
         Entitlement entitlement = lockEntitlement(orderId);
-        require(entitlement.userId() == user, "该预约不属于当前用户");
+        require(entitlement.userId() == user, FORBIDDEN, "该预约不属于当前用户");
         return entitlement;
     }
 
@@ -466,7 +484,7 @@ public class BookingService {
 
     private Offer activeOffer(long orderId, long offerId) {
         Offer offer = pending(orderId);
-        require(offer != null && offer.id() == offerId, "改期方案已失效");
+        require(offer != null && offer.id() == offerId, STALE_VERSION, "改期方案已失效");
         return offer;
     }
 
@@ -494,7 +512,7 @@ public class BookingService {
 
     private void staff(long actor, long shopId) {
         require(count("SELECT COUNT(*) FROM booking_staff WHERE user_id=? AND shop_id=?", actor, shopId) == 1,
-                "没有该门店的操作权限");
+                FORBIDDEN, "没有该门店的操作权限");
     }
 
     private int count(String query, Object... arguments) {
@@ -516,5 +534,9 @@ public class BookingService {
 
     private static void require(boolean condition, String message) {
         if (!condition) throw new BookingException(message);
+    }
+
+    private static void require(boolean condition, BookingException.Code code, String message) {
+        if (!condition) throw new BookingException(code, message);
     }
 }
