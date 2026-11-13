@@ -3,6 +3,9 @@ package org.javaup.controller;
 
 import jakarta.annotation.Resource;
 import jakarta.validation.Valid;
+import org.javaup.booking.BookingService;
+import org.springframework.beans.factory.ObjectProvider;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.javaup.dto.CancelVoucherOrderDto;
 import org.javaup.dto.GetVoucherOrderByVoucherIdDto;
 import org.javaup.dto.GetVoucherOrderDto;
@@ -43,6 +46,9 @@ public class VoucherOrderController {
     @Resource
     private IReconciliationTaskService reconciliationTaskService;
 
+    @Autowired
+    private ObjectProvider<BookingService> bookingService;
+
     @GetMapping("/seckill/token/{id}")
     public Result<String> issueSeckillAccessToken(@PathVariable("id") Long voucherId) {
         Long userId = UserHolder.getUser().getId();
@@ -76,6 +82,10 @@ public class VoucherOrderController {
     
     @PostMapping("/cancel")
     public Result<Boolean> cancel(@Valid @RequestBody CancelVoucherOrderDto cancelVoucherOrderDto) {
+        BookingService bookings = bookingService.getIfAvailable();
+        if (bookings != null && bookings.manages(cancelVoucherOrderDto.getVoucherId())) {
+            return Result.fail("预约券请在预约页管理，演示环境未开放退款");
+        }
         return Result.ok(voucherOrderService.cancel(cancelVoucherOrderDto));
     }
     

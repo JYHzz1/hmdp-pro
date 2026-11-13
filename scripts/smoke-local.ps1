@@ -1,7 +1,7 @@
 param([string]$Phone = '13900009001')
 $ErrorActionPreference = 'Stop'
 if (!$env:DB_PASSWORD) { throw 'Set DB_PASSWORD for physical shard checks.' }
-$base = 'http://127.0.0.1:5175/api'
+$base = 'http://127.0.0.1:5176/api'
 function Call-Api([string]$Path, $Body = $null, $Headers = @{}, [string]$Method = 'Post') {
     $params = @{Uri="$base$Path"; Method=$Method; Headers=$Headers}
     if ($null -ne $Body) { $params.ContentType='application/json'; $params.Body=($Body|ConvertTo-Json -Depth 8) }
@@ -13,7 +13,7 @@ function Check([bool]$Ok,[string]$Name) {
     if (!$Ok) { throw "FAILED $Name" }
     Write-Host "PASS $Name"
 }
-Check ((Invoke-WebRequest 'http://127.0.0.1:5175/').StatusCode -eq 200) 'Vue frontend'
+Check ((Invoke-WebRequest 'http://127.0.0.1:5176/').StatusCode -eq 200) 'Vue frontend'
 $types = Call-Api '/shop-type/list' -Method Get
 Check (@($types.data).Count -gt 0) 'types through Vite proxy and database'
 $shops = Call-Api '/shop/of/type?typeId=1&current=1' -Method Get
@@ -48,7 +48,7 @@ try {
     $orderCount = 0
     for($attempt=0;$attempt -lt 20;$attempt++) {
         $orderCount = 0
-        foreach($db in 'hmdpplus_local_0','hmdpplus_local_1') {
+        foreach($db in 'hmdppro_local_0','hmdppro_local_1') {
             foreach($n in 0,1) {
                 $row = & mysql -u root -N -e "SELECT COUNT(*) FROM $db.tb_voucher_order_$n WHERE id=$orderId"
                 if($LASTEXITCODE -ne 0) { throw 'Cannot inspect physical order table.' }
@@ -60,7 +60,7 @@ try {
     }
     Check ($orderCount -eq 1) 'exactly one order in four physical order tables'
     $stocks = @()
-    foreach($db in 'hmdpplus_local_0','hmdpplus_local_1') {
+    foreach($db in 'hmdppro_local_0','hmdppro_local_1') {
         foreach($n in 0,1) {
             $rows = & mysql -u root -N -e "SELECT stock FROM $db.tb_seckill_voucher_$n WHERE voucher_id=$voucherId"
             if($LASTEXITCODE -ne 0) { throw 'Cannot inspect physical stock table.' }
@@ -69,12 +69,12 @@ try {
     }
     Check ($stocks.Count -eq 1 -and [int]$stocks[0] -eq 1) 'database stock 2 -> 1'
     $redisCli = (Resolve-Path "$PSScriptRoot\..\..\redis\redis-cli.exe").Path
-    $redisStock = & $redisCli -p 6381 --raw GET "hmdpplus-local-seckill:stock:{$voucherId}"
+    $redisStock = & $redisCli -p 6382 --raw GET "hmdppro-local-seckill:stock:{$voucherId}"
     Check ([int]$redisStock -eq 1) 'Redis stock 2 -> 1'
 } finally { Remove-Item Env:MYSQL_PWD -ErrorAction SilentlyContinue }
 $replay = Invoke-RestMethod -Method Post "$base/voucher-order/seckill/$voucherId`?accessToken=$($access.data)" -Headers $auth
 Check (!$replay.success) 'consumed access token rejected'
-$metrics = Invoke-WebRequest 'http://127.0.0.1:8085/actuator/prometheus' -Headers $auth
+$metrics = Invoke-WebRequest 'http://127.0.0.1:8086/actuator/prometheus' -Headers $auth
 Check ($metrics.StatusCode -eq 200) 'Prometheus metrics endpoint'
 $summary = @{date=(Get-Date).ToString('yyyy-MM-dd HH:mm:ss');phone=$Phone;userId=[string]$me.data.id;voucherId=$voucherId;orderId=$orderId;accepted=$true;persisted=$true}
 $root=(Resolve-Path "$PSScriptRoot\..").Path

@@ -9,12 +9,12 @@
 | Java | JetBrains Runtime 17.0.7，包含 javac | — |
 | Maven | 3.9.14 | — |
 | MySQL | 8.0.45，已有服务 | 3306 |
-| Redis | 5.0.14.1，单独实例 | 6381 |
-| Kafka | 3.9.1，单机 KRaft | 19092 / 控制器 19093 |
-| 后端 | Spring Boot 3.5.4 | 8085 |
-| 前端 | Node 24.18.0、Vue 3 / Vite | 5175 |
+| Redis | 5.0.14.1，单独实例 | 6382 |
+| Kafka | 3.9.1，单机 KRaft | 19192 / 控制器 19193 |
+| 后端 | Spring Boot 3.5.4 | 8086 |
+| 前端 | Node 24.18.0、Vue 3 / Vite | 5176 |
 
-所有新启动网络服务只绑定 127.0.0.1。使用 hmdpplus_local_0 / hmdpplus_local_1，不重建原来的 hmdp 库。Redis 键与 Kafka topic 采用 hmdpplus-local 前缀，并且与旧版 Redis 进程隔离。
+所有新启动网络服务只绑定 127.0.0.1。使用 hmdppro_local_0 / hmdppro_local_1，不重建原来的 hmdp 库。Redis 键与 Kafka topic 采用 hmdppro-local 前缀，并且与旧版 Redis 进程隔离。
 
 ## 首次准备
 
@@ -67,7 +67,7 @@ $env:DB_PASSWORD = '你的本地MySQL密码'
 .\scripts\smoke-local.ps1
 ```
 
-页面：http://127.0.0.1:5175/。后端：http://127.0.0.1:8085。前端 /api 代理到后端，不需要原版的 80 端口 Nginx。
+页面：http://127.0.0.1:5176/。后端：http://127.0.0.1:8086。前端 /api 代理到后端，不需要原版的 80 端口 Nginx。
 
 登录验证码由本地接口返回和日志打印，不发送真实短信。冒烟脚本会创建演示用户和券，验证令牌、Kafka 落库、查单、物理表数量、两端库存、重复令牌拒绝和指标接口；演示数据保留以供检查。它不是吞吐测试。
 

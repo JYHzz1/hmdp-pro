@@ -6,6 +6,7 @@ import { ElLoading } from 'element-plus'
 import { getShopById } from '@/api/shop'
 import { getVoucherList, issueSeckillAccessToken, seckillVoucher, getSeckillOrderId, getVoucherOrderIdByVoucherId, cancelVoucherOrder, subscribeVoucher, unsubscribeVoucher, getSubscribeStatusBatch } from '@/api/voucher'
 import { useUserStore } from '@/stores'
+import request from '@/utils/request'
 
 const router = useRouter()
 const route = useRoute()
@@ -18,6 +19,7 @@ const vouchers = ref([])
 const seckillInProgress = ref(false)
 // 已购状态映射：voucherId -> boolean
 const purchasedMap = ref({})
+const bookableMap = ref({})
 // 订阅状态映射：voucherId -> 0|1|2 （0 未订阅/已取消；1 已订阅；2 自动发券成功）
 const subscribeStatusMap = ref({})
 
@@ -37,6 +39,14 @@ const refreshPurchaseStatus = async () => {
         try {
           const res = await getVoucherOrderIdByVoucherId(String(v.id))
           purchasedMap.value[String(v.id)] = !!res?.data
+          if (res?.data) {
+            try {
+              const booking = await request.get('/booking/supported/' + v.id)
+              bookableMap.value[String(v.id)] = !!booking?.data
+            } catch {
+              bookableMap.value[String(v.id)] = false
+            }
+          }
         } catch (e) {
           // 忽略单项错误，保持既有状态
         }
@@ -232,6 +242,7 @@ const seckill = async (v) => {
           const check = await getVoucherOrderIdByVoucherId(String(v.id))
           if (check?.data) {
             purchasedMap.value[String(v.id)] = true
+            await refreshPurchaseStatus()
           }
         } catch (e) {
           // 忽略错误，不影响既有状态
@@ -452,7 +463,9 @@ onMounted(() => {
             <div class="seckill-time">{{ formatTime(v) }}</div>
             <div v-if="isPurchased(v.id)" class="seckill-status">
               <span class="purchased-tag">已购</span>
-              <span class="cancel-link" @click="cancelVoucher(v)">取消领取</span>
+              <span v-if="bookableMap[String(v.id)]" class="cancel-link"
+                    @click="router.push({ path: '/booking', query: { voucherId: String(v.id) } })">预约服务</span>
+              <span v-else class="cancel-link" @click="cancelVoucher(v)">取消领取</span>
             </div>
             <!-- 库存为 0 且未购买时，展示订阅到券提醒 -->
             <div v-else-if="Number(v.stock) < 1 && !isPurchased(v.id)" class="subscribe-box">

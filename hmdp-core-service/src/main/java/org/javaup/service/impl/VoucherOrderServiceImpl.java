@@ -571,9 +571,14 @@ public class VoucherOrderServiceImpl extends ServiceImpl<VoucherOrderMapper, Vou
         }
         boolean updateResult = lambdaUpdate().set(VoucherOrder::getStatus, OrderStatus.CANCEL.getCode())
                 .set(VoucherOrder::getUpdateTime, LocalDateTimeUtil.now())
+                .eq(VoucherOrder::getId, voucherOrder.getId())
+                .eq(VoucherOrder::getStatus, OrderStatus.NORMAL.getCode())
                 .eq(VoucherOrder::getUserId, UserHolder.getUser().getId())
                 .eq(VoucherOrder::getVoucherId, cancelVoucherOrderDto.getVoucherId())
                 .update();
+        if (!updateResult) {
+            return false;
+        }
         long traceId = snowflakeIdGenerator.nextId();
         VoucherReconcileLogDto voucherReconcileLogDto = new VoucherReconcileLogDto();
         voucherReconcileLogDto.setOrderId(voucherOrder.getId());

@@ -7,7 +7,7 @@ New-Item -ItemType Directory -Force $runtime | Out-Null
 $env:MYSQL_PWD = $env:DB_PASSWORD
 try {
     foreach ($n in 0,1) {
-        $db = "hmdpplus_local_$n"
+        $db = "hmdppro_local_$n"
         $exists = & $MySqlExe -u root -N -e "SELECT SCHEMA_NAME FROM INFORMATION_SCHEMA.SCHEMATA WHERE SCHEMA_NAME='$db'"
         if ($LASTEXITCODE -ne 0) { throw 'MySQL connection failed.' }
         if ($exists) { Write-Host "Keeping existing $db"; continue }
@@ -22,7 +22,12 @@ try {
         if ($LASTEXITCODE -ne 0) { throw "Import failed for $db; inspect it before retrying." }
     }
     $sharding = Get-Content -Raw -LiteralPath "$root\hmdp-core-service\src\main\resources\shardingsphere.yaml"
-    foreach ($n in 0,1) { $sharding = $sharding.Replace("/hmdp_$n`?", "/hmdpplus_local_$n`?") }
+    foreach ($n in 0,1) { $sharding = $sharding.Replace("/hmdp_$n`?", "/hmdppro_local_$n`?") }
+    & $MySqlExe -u root -e "CREATE DATABASE IF NOT EXISTS hmdppro_booking CHARACTER SET utf8mb4"
+    if ($LASTEXITCODE -ne 0) { throw 'Cannot create booking database.' }
+    $bookingSql = (Join-Path $root 'sql/booking.sql').Replace('\','/')
+    & $MySqlExe --default-character-set=utf8mb4 -u root hmdppro_booking -e "source $bookingSql"
+    if ($LASTEXITCODE -ne 0) { throw 'Booking schema initialization failed.' }
     $quotedPassword = "'" + $env:DB_PASSWORD.Replace("'", "''") + "'"
     $sharding = $sharding.Replace('password: root', "password: $quotedPassword")
     [IO.File]::WriteAllText("$runtime\shardingsphere-local.yaml", $sharding, (New-Object Text.UTF8Encoding($false)))

@@ -36,7 +36,7 @@ export default defineConfig({
   //   proxy: {
   //     '/api': {
   //       // 目标服务器地址，这里是本地的另一个服务，运行在端口1011上
-  //       target: 'http://localhost:8085',
+  //       target: 'http://localhost:8086',
   //       // 是否改变请求的源（Origin），设置为true时，会将请求的源修改为目标服务器的源
   //       changeOrigin: true,
   //       // 路径重写规则，将以/api开头的路径替换为空字符串
@@ -49,11 +49,11 @@ export default defineConfig({
   // },
   server: {
     host: '127.0.0.1',
-    port: 5175,
+    port: 5176,
     strictPort: true,
     proxy: {
       '/api': {
-        target: 'http://127.0.0.1:8085',
+        target: 'http://127.0.0.1:8086',
         changeOrigin: true,
         rewrite: (path) => path.replace(/^\/api/, '')
       }
