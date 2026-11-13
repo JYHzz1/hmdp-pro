@@ -99,7 +99,7 @@ class BookingMysqlTest {
     @Test
     void expiryAndLateConfirmPreserveOriginalBooking() throws Exception {
         bookings.reserve(31, 21, 11, "reserve");
-        long offer = bookings.propose(31, 21, 12, "offer");
+        long offer = issueStaffOffer();
         store.sql.update("UPDATE booking_offer SET expires_at=NOW()-INTERVAL 1 SECOND WHERE id=?", offer);
         var results = race(List.<Callable<String>>of(
                 () -> { bookings.sweep(); return "SWEEP"; },
@@ -113,37 +113,84 @@ class BookingMysqlTest {
     }
 
     @Test
-    void confirmationFailureRollsBackBothSlotCounters() {
+    void directRescheduleFailureRollsBackBothSlotCounters() {
         bookings.reserve(31, 21, 11, "reserve");
-        long offer = bookings.propose(31, 21, 12, "offer");
         store.sql.execute("""
                 CREATE TRIGGER reject_reschedule BEFORE UPDATE ON booking_reservation
                 FOR EACH ROW SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='injected update failure'
                 """);
         try {
-            assertThrows(DataAccessException.class, () -> bookings.confirm(31, 21, offer, "confirm"));
+            assertThrows(DataAccessException.class, () -> bookings.reschedule(31, 21, 12, 1, "switch"));
         } finally {
             store.sql.execute("DROP TRIGGER reject_reschedule");
         }
         assertEquals(1, count("SELECT booked FROM booking_slot WHERE id=11"));
-        assertEquals(1, count("SELECT held FROM booking_slot WHERE id=12"));
+        assertEquals(0, count("SELECT held FROM booking_slot WHERE id=12"));
         assertEquals(0, count("SELECT booked FROM booking_slot WHERE id=12"));
-        assertEquals(0, count("SELECT COUNT(*) FROM booking_command WHERE operation='confirm'"));
-        assertEquals(2, bookings.confirm(31, 21, offer, "confirm"));
+        assertEquals(0, count("SELECT COUNT(*) FROM booking_command WHERE operation='reschedule'"));
+        assertEquals(2, bookings.reschedule(31, 21, 12, 1, "switch"));
+        assertEquals(2, bookings.reschedule(31, 21, 12, 1, "switch"));
+        assertEquals(0, count("SELECT booked FROM booking_slot WHERE id=11"));
+        assertEquals(1, count("SELECT booked FROM booking_slot WHERE id=12"));
     }
 
     @Test
     void competingConfirmAndCancelCannotBothChangeSameVersion() throws Exception {
         bookings.reserve(31, 21, 11, "reserve");
-        long offer = bookings.propose(31, 21, 12, "offer");
         var results = race(List.<Callable<Boolean>>of(
-                () -> attempt(() -> bookings.confirm(31, 21, offer, "confirm")),
+                () -> attempt(() -> bookings.reschedule(31, 21, 12, 1, "switch")),
                 () -> attempt(() -> bookings.cancel(31, 21, 1, "cancel"))));
         boolean confirmed = results.get(0).get(10, TimeUnit.SECONDS);
         assertNotEquals(confirmed, results.get(1).get(10, TimeUnit.SECONDS));
         assertEquals(0, count("SELECT booked FROM booking_slot WHERE id=11"));
         assertEquals(0, count("SELECT held FROM booking_slot WHERE id=12"));
         assertEquals(confirmed ? 1 : 0, count("SELECT booked FROM booking_slot WHERE id=12"));
+    }
+
+    @Test
+    void fullTargetLeavesOriginalAppointmentIntact() {
+        bookings.reserve(31, 21, 11, "reserve");
+        bookings.reserve(32, 22, 12, "reserve");
+        var failure = assertThrows(BookingException.class,
+                () -> bookings.reschedule(31, 21, 12, 1, "switch"));
+        assertEquals(BookingException.Code.SLOT_FULL, failure.code);
+        assertEquals(11, count("SELECT slot_id FROM booking_reservation WHERE order_id=21"));
+        assertEquals(1, count("SELECT booked FROM booking_slot WHERE id=11"));
+    }
+
+    @Test
+    void endedClosedSlotReturnsVoucherAndReportsShopCancellation() {
+        bookings.reserve(31, 21, 11, "reserve");
+        issueStaffOffer();
+        store.sql.update("UPDATE booking_slot SET end_at=NOW()-INTERVAL 1 SECOND WHERE id=11");
+        bookings.sweep();
+        bookings.sweep();
+        var view = bookings.view(31, 21);
+        assertTrue(view.cancelledByShop());
+        assertEquals("AVAILABLE", view.entitlementState());
+        assertEquals(0, count("SELECT booked FROM booking_slot WHERE id=11"));
+        assertEquals(0, count("SELECT held FROM booking_slot WHERE id=12"));
+        assertEquals(1, count("SELECT COUNT(*) FROM booking_event WHERE operation='SHOP_CANCELLED'"));
+        assertEquals(3, bookings.reserve(31, 21, 12, "rebook"));
+    }
+
+    @Test
+    void staffCancellationRestoresVoucherBeforeClosedSlotEnds() {
+        bookings.reserve(31, 21, 11, "reserve");
+        long offer = issueStaffOffer();
+        assertEquals(1, bookings.cancelClosedSlot(99, 11));
+        assertEquals(0, bookings.cancelClosedSlot(99, 11));
+        assertTrue(bookings.view(31, 21).cancelledByShop());
+        assertEquals(0, count("SELECT held+booked FROM booking_slot WHERE id=12"));
+        assertThrows(BookingException.class, () -> bookings.confirm(31, 21, offer, "confirm"));
+        assertEquals(3, bookings.reserve(31, 21, 12, "rebook"));
+    }
+
+    private long issueStaffOffer() {
+        bookings.preference(31, 21, 5, 4);
+        bookings.closeSlot(99, 11);
+        bookings.applyPlan(99, 11, 5, 4);
+        return bookings.view(31, 21).offer().id();
     }
 
     private boolean attempt(Runnable action) {

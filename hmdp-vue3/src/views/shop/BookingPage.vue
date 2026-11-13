@@ -68,7 +68,8 @@ let loadedVoucher = ''
 
 function change(operation, value) {
   return run(async () => {
-    await sendCommand('/' + booking.value.orderId + '/' + operation, { value })
+    const args = operation === 'reschedule' ? { value, version: booking.value.reservation.version } : { value }
+    await sendCommand('/' + booking.value.orderId + '/' + operation, args)
     await load()
   })
 }
@@ -92,6 +93,9 @@ function operate(action) {
     } else if (action === 'close') {
       await api(prefix + '/close', 'post')
       staffNotice.value = '时段已停约'
+    } else if (action === 'cancel-affected') {
+      const count = await api(prefix + '/cancel-affected', 'post')
+      staffNotice.value = `已取消 ${count} 笔预约，服务券已恢复`
     } else {
       const result = await api(prefix + '/' + action, 'post',
         { radiusKm: radiusKm.value, windowHours: windowHours.value })
@@ -126,11 +130,12 @@ onMounted(() => {
       </form>
       <template v-if="booking">
         <p>订单 {{ booking.orderId }} · {{ { AVAILABLE: '可预约', RESERVED: '已预约', USED: '已使用' }[booking.entitlementState] }}</p>
+        <el-alert v-if="booking.cancelledByShop" title="原时段因门店停约已取消，服务券已恢复，可重新预约。" type="warning" show-icon :closable="false" />
         <div v-if="confirmed" class="summary">
           <strong>{{ booking.currentSlot.shop }}</strong>
           <small>时段编号 {{ booking.currentSlot.id }}</small>
           <span>{{ time(booking.currentSlot.start) }} – {{ time(booking.currentSlot.end) }}</span>
-          <span v-if="!booking.currentSlot.open" class="warning">该时段已停业，请查看改派方案或取消预约</span>
+          <span v-if="!booking.currentSlot.open" class="warning">原时段已停约。请选择新时段，或取消后保留服务券。</span>
           <small>核销信息：门店 {{ booking.currentSlot.shopId }} · 预约版本 {{ booking.reservation.version }}</small>
           <el-button :disabled="busy" @click="change('cancel', booking.reservation.version)">取消预约</el-button>
         </div>
@@ -142,7 +147,7 @@ onMounted(() => {
             <el-button :disabled="busy" @click="change('decline', booking.offer.id)">放弃方案</el-button>
           </div>
         </div>
-        <template v-if="booking.entitlementState === 'AVAILABLE' || (confirmed && !booking.offer)">
+        <template v-if="booking.entitlementState === 'AVAILABLE' || confirmed">
           <h3>{{ confirmed ? '选择新时段' : '选择预约时段' }}</h3>
           <p v-if="!booking.candidates.length">当前没有可用时段</p>
           <select v-else v-model="selected" aria-label="可用时段">
@@ -151,8 +156,8 @@ onMounted(() => {
               {{ slot.shop }} · {{ time(slot.start) }} · 余 {{ slot.capacity - slot.booked - slot.held }}
             </option>
           </select>
-          <el-button v-if="selected" type="primary" :disabled="busy" @click="change(confirmed ? 'offers' : 'reserve', selected)">
-            {{ confirmed ? '保留原预约并占位' : '确认预约' }}
+          <el-button v-if="selected" type="primary" :disabled="busy" @click="change(confirmed ? 'reschedule' : 'reserve', selected)">
+            {{ confirmed ? '确认改期' : '确认预约' }}
           </el-button>
         </template>
       </template>
@@ -172,6 +177,11 @@ onMounted(() => {
       <div class="row">
         <el-input v-model="station.slot" placeholder="受影响时段 ID" aria-label="时段 ID" />
         <el-button :disabled="busy || !station.slot" @click="operate('close')">停约</el-button>
+        <el-popconfirm title="取消该时段至多 100 笔预约并恢复服务券？" @confirm="operate('cancel-affected')">
+          <template #reference>
+            <el-button :disabled="busy || !station.slot">取消受影响预约</el-button>
+          </template>
+        </el-popconfirm>
         <el-button :disabled="busy || !station.slot" @click="operate('compare')">比较改派策略</el-button>
         <el-button :disabled="busy || !station.slot" type="primary" @click="operate('assign')">发送备选方案</el-button>
       </div>

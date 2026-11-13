@@ -40,7 +40,8 @@ public class BookingService {
                 double latitude, double longitude) {}
     record Offer(long id, long target, long version, LocalDateTime expires, String state) {}
     record BookingView(long orderId, long voucherId, String entitlementState, Reservation reservation,
-                       Slot currentSlot, Offer offer, Slot offeredSlot, List<Slot> candidates) {}
+                       Slot currentSlot, Offer offer, Slot offeredSlot, List<Slot> candidates,
+                       boolean cancelledByShop) {}
     record Comparison(AssignmentPlanner.Plan nearest, AssignmentPlanner.Plan constrained,
                       AssignmentPlanner.Plan maximum) {}
 
@@ -69,8 +70,14 @@ public class BookingService {
             LocalDateTime now = now();
             Slot current = reservation == null ? null : slot(reservation.slotId(), false);
             Slot offered = offer == null ? null : slot(offer.target(), false);
+            boolean cancelledByShop = reservation != null && reservation.state().equals("CANCELLED")
+                    && count("""
+                            SELECT COUNT(*) FROM booking_event
+                            WHERE order_id=? AND version=? AND operation='SHOP_CANCELLED'
+                            """, orderId, reservation.version()) > 0;
             return new BookingView(orderId, entitlement.voucherId(), entitlement.state(), reservation,
-                    current, offer, offered, candidates(entitlement.voucherId(), now, entitlement.validUntil()));
+                    current, offer, offered, candidates(entitlement.voucherId(), now, entitlement.validUntil()),
+                    cancelledByShop);
         });
     }
 
@@ -100,11 +107,32 @@ public class BookingService {
         });
     }
 
-    long propose(long user, long orderId, long targetId, String requestId) {
+    long reschedule(long user, long orderId, long targetId, long expectedVersion, String requestId) {
         return store.tx.execute(status -> {
             Entitlement entitlement = owned(user, orderId);
-            return command(orderId, "propose", requestId, Long.toString(targetId),
-                    () -> createOffer(entitlement, targetId, user));
+            return command(orderId, "reschedule", requestId, targetId + ":" + expectedVersion, () -> {
+                Reservation reservation = confirmed(orderId);
+                require(reservation.version() == expectedVersion, STALE_VERSION, "预约已变更，请刷新");
+                require(reservation.slotId() != targetId, "请选择新的时段");
+                Offer offer = pending(orderId);
+                // A former operator offer can occupy a third slot. Preserve one lock order.
+                var ids = new java.util.TreeSet<>(List.of(reservation.slotId(), targetId));
+                if (offer != null) ids.add(offer.target());
+                Map<Long, Slot> locked = new HashMap<>();
+                for (long id : ids) locked.put(id, slot(id, true));
+                Slot original = locked.get(reservation.slotId());
+                Slot target = locked.get(targetId);
+                LocalDateTime now = now();
+                require(!original.open() || now.isBefore(original.start().minusMinutes(30)),
+                        "已过改期截止时间");
+                validateTarget(entitlement, target, now);
+                if (offer != null) releaseOffer(orderId, offer, user, "DECLINED");
+                require(sql.update("""
+                        UPDATE booking_slot SET booked=booked+1
+                        WHERE id=? AND held+booked<capacity
+                        """, targetId) == 1, SLOT_FULL, "目标时段已满，原预约未变更");
+                return moveReservation(orderId, reservation, targetId, user);
+            });
         });
     }
 
@@ -154,12 +182,8 @@ public class BookingService {
                 validateTarget(entitlement, slots.target(), now);
                 require(sql.update("UPDATE booking_slot SET held=held-1,booked=booked+1 WHERE id=? AND held>0",
                         offer.target()) == 1, "目标占位不存在");
-                releaseBooked(reservation.slotId());
-                long version = reservation.version() + 1;
-                sql.update("UPDATE booking_reservation SET slot_id=?,version=? WHERE order_id=?",
-                        offer.target(), version, orderId);
+                long version = moveReservation(orderId, reservation, offer.target(), user);
                 sql.update("UPDATE booking_offer SET state='ACCEPTED' WHERE id=?", offerId);
-                event(orderId, user, "RESCHEDULE", reservation.slotId(), offer.target(), version);
                 return version;
             });
         });
@@ -219,6 +243,31 @@ public class BookingService {
             staff(actor, current.shopId());
             sql.update("UPDATE booking_slot SET open=FALSE WHERE id=?", slotId);
         });
+    }
+
+    int cancelClosedSlot(long actor, long slotId) {
+        Slot closed = slot(slotId, false);
+        staff(actor, closed.shopId());
+        require(!closed.open(), "请先关闭受影响时段");
+        List<Long> affected = sql.queryForList("""
+                SELECT order_id FROM booking_reservation WHERE slot_id=? AND state='CONFIRMED'
+                ORDER BY order_id LIMIT 100
+                """, Long.class, slotId);
+        int cancelled = 0;
+        for (long orderId : affected) {
+            if (Boolean.TRUE.equals(store.tx.execute(status -> {
+                lockEntitlement(orderId);
+                Reservation reservation = reservation(orderId);
+                if (reservation == null || reservation.slotId() != slotId
+                        || !reservation.state().equals("CONFIRMED")) return false;
+                Offer offer = pending(orderId);
+                Slot current = lockSlots(slotId, offer == null ? slotId : offer.target()).original();
+                if (current.open()) return false;
+                cancelForClosure(orderId, reservation, offer, actor);
+                return true;
+            }))) cancelled++;
+        }
+        return cancelled;
     }
 
     void preference(long user, long orderId, int radiusKm, int windowHours) {
@@ -351,17 +400,31 @@ public class BookingService {
                 Offer offer = pending(orderId);
                 Slot current = lockSlots(reservation.slotId(), offer == null ? reservation.slotId() : offer.target()).original();
                 if (now().isBefore(current.end())) return;
-                if (offer != null) releaseOffer(orderId, offer, 0, "DECLINED");
                 if (current.open()) {
+                    if (offer != null) releaseOffer(orderId, offer, 0, "DECLINED");
                     state(orderId, "USED");
                     finish(orderId, reservation, 0, "NO_SHOW");
                 } else {
-                    releaseBooked(current.id());
-                    state(orderId, "AVAILABLE");
-                    finish(orderId, reservation, 0, "CANCELLED");
+                    cancelForClosure(orderId, reservation, offer, 0);
                 }
             });
         }
+    }
+
+    private void cancelForClosure(long orderId, Reservation reservation, Offer offer, long actor) {
+        if (offer != null) releaseOffer(orderId, offer, actor, "DECLINED");
+        releaseBooked(reservation.slotId());
+        state(orderId, "AVAILABLE");
+        long version = finish(orderId, reservation, actor, "CANCELLED");
+        event(orderId, actor, "SHOP_CANCELLED", reservation.slotId(), null, version);
+    }
+
+    private long moveReservation(long orderId, Reservation reservation, long target, long actor) {
+        releaseBooked(reservation.slotId());
+        long version = reservation.version() + 1;
+        sql.update("UPDATE booking_reservation SET slot_id=?,version=? WHERE order_id=?", target, version, orderId);
+        event(orderId, actor, "RESCHEDULE", reservation.slotId(), target, version);
+        return version;
     }
 
     private long finish(long orderId, Reservation reservation, long actor, String state) {

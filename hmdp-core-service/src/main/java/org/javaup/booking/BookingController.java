@@ -24,6 +24,7 @@ class BookingController {
     }
 
     record Command(@Positive long value, @NotBlank @Size(max = 64) String requestId) {}
+    record Reschedule(@Positive long value, @Positive long version, @NotBlank @Size(max = 64) String requestId) {}
     record Redeem(@Positive long orderId, @Positive long version, @NotBlank @Size(max = 64) String requestId) {}
     record PlanOptions(@Min(1) @Max(50) int radiusKm, @Min(1) @Max(168) int windowHours) {}
     record Preference(@Min(1) @Max(50) int radiusKm, @Min(1) @Max(168) int windowHours) {}
@@ -48,9 +49,9 @@ class BookingController {
         return Result.ok(bookings.reserve(user(), orderId, command.value(), command.requestId()));
     }
 
-    @PostMapping("/{orderId}/offers")
-    Result<Long> propose(@PathVariable long orderId, @Valid @RequestBody Command command) {
-        return Result.ok(bookings.propose(user(), orderId, command.value(), command.requestId()));
+    @PostMapping("/{orderId}/reschedule")
+    Result<Long> reschedule(@PathVariable long orderId, @Valid @RequestBody Reschedule command) {
+        return Result.ok(bookings.reschedule(user(), orderId, command.value(), command.version(), command.requestId()));
     }
 
     @PostMapping("/{orderId}/confirm")
@@ -83,6 +84,11 @@ class BookingController {
     Result<Void> close(@PathVariable long slotId) {
         bookings.closeSlot(user(), slotId);
         return Result.ok();
+    }
+
+    @PostMapping("/slots/{slotId}/cancel-affected")
+    Result<Integer> cancelAffected(@PathVariable long slotId) {
+        return Result.ok(bookings.cancelClosedSlot(user(), slotId));
     }
 
     @PostMapping("/slots/{slotId}/compare")
